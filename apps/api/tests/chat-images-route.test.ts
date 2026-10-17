@@ -195,19 +195,48 @@ describe('POST /threads/[id]/chat with images', () => {
     expect(mockCreateMessage).not.toHaveBeenCalled();
   });
 
-  it('refuses images with 422 under PRIMARY_BACKEND=inkling, but not text', async () => {
+  it('stops reading a body with no declared size once it passes the cap (413)', async () => {
+    // A chunked upload declares no size, so only the read itself can stop it.
+    // Counting what the route pulled proves it stopped near the cap instead of
+    // buffering the whole body first.
+    const CHUNK = new Uint8Array(1024 * 1024).fill(0x41);
+    const TOTAL_CHUNKS = 64;
+    let pulled = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (pulled >= TOTAL_CHUNKS) return controller.close();
+        pulled++;
+        controller.enqueue(CHUNK);
+      },
+    });
+    const req = new NextRequest('http://localhost/api/v2/threads/thread-1/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+      duplex: 'half',
+    } as RequestInit & { duplex: 'half' });
+
+    const res = await chatPost(req, ctx('thread-1'));
+
+    expect(res.status).toBe(413);
+    expect(mockCreateMessage).not.toHaveBeenCalled();
+    expect(pulled * CHUNK.byteLength).toBeLessThanOrEqual(MAX_CHAT_BODY_BYTES + 2 * CHUNK.byteLength);
+    expect(pulled).toBeLessThan(TOTAL_CHUNKS);
+  });
+
+  it('accepts images under PRIMARY_BACKEND=inkling: Inkling sees images too', async () => {
     h.primaryBackend = 'inkling';
 
-    const withImages = await chatPost(
+    const res = await chatPost(
       chatRequest({ message: 'q', images: [{ media_type: 'image/png', data: PNG_B64 }] }),
       ctx('thread-1')
     );
-    expect(withImages.status).toBe(422);
-    expect(mockCreateMessage).not.toHaveBeenCalled();
+    await drain(res);
 
-    const textOnly = await chatPost(chatRequest({ message: 'q' }), ctx('thread-1'));
-    await drain(textOnly);
-    expect(textOnly.status).toBe(200);
+    expect(res.status).toBe(200);
+    expect(mockRunFacilitator).toHaveBeenCalledWith(expect.any(Array), undefined, {
+      images: [{ mediaType: 'image/png', data: PNG_B64 }],
+    });
   });
 });
 

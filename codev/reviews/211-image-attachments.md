@@ -33,9 +33,17 @@ covers `apps/api` (validation, facilitator plumbing, an additive `attachments` k
   splitting its hunks would have produced an intermediate commit that doesn't typecheck.
 - `takeOpeningImages` became `peekOpeningImages` + `clearOpeningImages`. A destructive read in
   a render-time initializer loses the images under StrictMode's double invocation.
-- The empty-final scan scenario was not run through the route. Image turns can't reach the
-  Inkling rung, and the route's empty-`done` path is covered by the existing
-  `chat-empty-answer` tests. The success and error paths cover both tables.
+- The empty-final scan scenario was not run through the route. The route's empty-`done` path
+  is covered by the existing `chat-empty-answer` tests, and the success and error paths cover
+  both tables.
+- **Amended after review (2026-10-17): image turns now reach Inkling.** The spec assumed Inkling
+  could not see images and listed that as something to verify during planning. The plan never
+  verified it, and a reviewer's probe showed the production Tinker endpoint accepts base64
+  `image_url` parts. The Inkling client now sends image parts (current turn and history), the
+  Gemini-only gate and the `PRIMARY_BACKEND=inkling` 422 are gone, and the tests assert that
+  the images reach the outgoing Inkling request on every path. The same change made the body
+  cap hold for a body with no declared size: the route used to read such a body whole before
+  checking it.
 
 ## Consultation Feedback
 
@@ -43,6 +51,10 @@ Not run: the `consult` CLI is not installed on the machine this was built on. Th
 approved the spec with the recommended answers to all open questions (2026-10-01).
 
 ## Lessons Learned
+
+- An assumption listed as "verify during plan" has to become a plan step, or it is never
+  checked. Here the unverified "Inkling can't see images" drove a whole design branch (gate,
+  422, tests that pinned it); a one-request probe would have disproved it before any code.
 
 - **A history builder that skips entries breaks every "drop the last entry" consumer.**
   `convertToGeminiHistory` skipped text-less user messages, and `runFacilitator` removed the

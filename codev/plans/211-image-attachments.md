@@ -78,7 +78,7 @@ Serve placeholders as an additive `attachments` key without changing text-only m
 
 #### Objective
 Gemini sees the images on the current turn for every call in the request, and nowhere else.
-Later turns get a note instead. Image turns never touch Inkling.
+Later turns get a note instead. Image turns never touch Inkling. *(Superseded 2026-10-17: Inkling accepts images; see the spec's amendment.)*
 
 #### Files to Create / Modify
 - `apps/api/lib/ai/gemini-client.ts`: `streamGemini(message: string | Part[], …)`, passed

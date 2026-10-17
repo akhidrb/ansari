@@ -224,6 +224,16 @@ it should reuse the prototype's request shape. Non-image files (PDF) are also ou
 | History desync (image-only turn) | E: one Content per user message, covered by a test |
 | Higher token cost | Already metered per message; 4-image cap |
 
+## Amendment (2026-10-17): Inkling can see images
+
+The assumption "Inkling (Tinker, OpenAI-compatible) does **not** accept image input" was wrong.
+A reviewer's probe on PR #284 sent a base64 `image_url` part to the production endpoint
+(`thinkingmachines/Inkling`) and got a correct answer; a remote URL is refused with 400, so images
+must go as `data:` URLs. Approach D and resolution 2 are therefore superseded: image turns run on
+Inkling like text turns (primary, empty-final rung, #79 rescue), with the images sent as
+`image_url` parts, and `PRIMARY_BACKEND=inkling` no longer refuses images. The risk "Inkling
+answers without seeing the image" no longer applies.
+
 ## References
 
 - `apps/api/src/app/api/v2/threads/[id]/chat/route.ts`

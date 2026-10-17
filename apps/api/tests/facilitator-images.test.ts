@@ -6,10 +6,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
  * Images ride on the CURRENT user turn of every Gemini call in the request
  * (first call, tool continuation, empty-final retry, synthesis) and nowhere
  * else. Stored placeholders on earlier messages become a "no longer available"
- * note. Image turns never go to Inkling (it cannot see images).
+ * note. When an image turn moves to Inkling (primary, empty-final rung, or the
+ * #79 rescue), Inkling gets the same image parts Gemini would have.
  *
  * Scaffolding mirrors tests/facilitator-continuation.test.ts, with Inkling
- * mocked as configured so a wrongly-engaged rung would show up as a call.
+ * mocked as configured so every Inkling call and its current turn are recorded.
  */
 
 type AnyEvent = { type: string; data?: unknown; response?: unknown };
@@ -264,40 +265,45 @@ describe('later turns: placeholder becomes a note (spec 211)', () => {
   });
 });
 
-describe('image turns never reach Inkling (spec 211)', () => {
-  it('a twice-empty final errors instead of escalating to the Inkling rung', async () => {
+describe('image turns that move to Inkling keep their images (spec 211)', () => {
+  const IMAGE_TURN = [{ text: 'What is this?' }, IMAGE_PART];
+
+  it('a twice-empty final escalates to the Inkling rung with the image parts', async () => {
     h.scripts = [emptyRound(), emptyRound()];
 
     const events = await collect(runFacilitator([user('What is this?', 1)], undefined, { images: [IMAGE] }));
 
-    expect(h.inklingCalls).toHaveLength(0);
-    expect(events.at(-1)?.type).toBe('error');
+    expect(h.inklingCalls).toHaveLength(1);
+    expect(h.inklingCalls[0].message).toEqual(IMAGE_TURN);
+    expect(events.at(-1)?.type).toBe('done');
   });
 
-  it('a terminal Gemini error is not rescued on Inkling', async () => {
+  it('a terminal Gemini error is rescued on Inkling with the image parts', async () => {
     h.scripts = [throwingRound()];
 
     const events = await collect(runFacilitator([user('What is this?', 1)], undefined, { images: [IMAGE] }));
 
-    expect(h.inklingCalls).toHaveLength(0);
-    expect(events.at(-1)?.type).toBe('error');
+    expect(h.inklingCalls).toHaveLength(1);
+    expect(h.inklingCalls[0].message).toEqual(IMAGE_TURN);
+    expect(events.at(-1)?.type).toBe('done');
   });
 
-  it('control: the same error on a text-only turn IS rescued (the gate is the images)', async () => {
+  it('an Inkling-primary request sends the image parts to Inkling and never calls Gemini', async () => {
+    h.primaryBackend = 'inkling';
+
+    const events = await collect(runFacilitator([user('What is this?', 1)], undefined, { images: [IMAGE] }));
+
+    expect(h.calls).toHaveLength(0);
+    expect(h.inklingCalls[0].message).toEqual(IMAGE_TURN);
+    expect(events.at(-1)?.type).toBe('done');
+  });
+
+  it('control: a text-only rescue still sends Inkling the plain string', async () => {
     h.scripts = [throwingRound()];
 
     await collect(runFacilitator([user('What is sabr?')]));
 
     expect(h.inklingCalls).toHaveLength(1);
-  });
-
-  it('an image turn on an Inkling-primary request errors before any model call', async () => {
-    h.primaryBackend = 'inkling';
-
-    const events = await collect(runFacilitator([user('What is this?', 1)], undefined, { images: [IMAGE] }));
-
-    expect(events).toEqual([{ type: 'error', data: 'Image attachments are not available right now' }]);
-    expect(h.calls).toHaveLength(0);
-    expect(h.inklingCalls).toHaveLength(0);
+    expect(h.inklingCalls[0].message).toBe('What is sabr?');
   });
 });

@@ -27,6 +27,31 @@ export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
  */
 export const MAX_CHAT_BODY_BYTES = 16 * 1024 * 1024;
 
+/**
+ * Read a request body as text, stopping as soon as it passes `maxBytes`.
+ * Returns null when the body is over the limit. A body sent without a
+ * Content-Length (chunked) can be any size, and reading it whole before
+ * checking would let one request fill the server's memory; this never holds
+ * more than `maxBytes` plus one chunk.
+ */
+export async function readBodyWithin(request: Request, maxBytes: number): Promise<string | null> {
+  if (!request.body) return '';
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel();
+      return null;
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
 // Standard base64, padded. Checked before decoding because Buffer.from(…,
 // 'base64') silently skips characters it does not understand.
 const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;

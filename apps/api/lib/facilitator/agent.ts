@@ -443,10 +443,9 @@ export async function* runFacilitator(
     /**
      * Images attached to the current (last) user message (spec 211). Held in
      * memory for this request only: they ride on the current user turn of every
-     * Gemini call — first call, continuations, retries, synthesis — and are
-     * never part of a persisted or yielded payload. A request with images is
-     * Gemini-only: Inkling cannot see images, so neither the empty-final
-     * ladder's Inkling rung nor the #79 rescue engages.
+     * model call — first call, continuations, retries, synthesis — on Gemini and
+     * on Inkling alike (the Inkling client sends them as data-URL image parts),
+     * and are never part of a persisted or yielded payload.
      */
     images?: ImageAttachment[];
   }
@@ -494,7 +493,9 @@ export async function* runFacilitator(
   geminiHistory = geminiHistory.slice(0, -1);
 
   // The current user turn as Gemini parts (spec 211): the text plus one inlineData
-  // part per attached image. Text-only turns keep sending the plain string.
+  // part per attached image. Text-only turns keep sending the plain string. Both
+  // clients take this same value, so an image turn that moves to Inkling (primary,
+  // ladder rung, or #79 rescue) still carries its images.
   const images = options?.images ?? [];
   const hasImages = images.length > 0;
   const userParts: Part[] = [
@@ -502,12 +503,9 @@ export async function* runFacilitator(
     ...images.map((img) => ({ inlineData: { mimeType: img.mediaType, data: img.data } })),
   ];
   const userTurn: Content = { role: 'user', parts: hasImages ? userParts : [{ text: userQuery }] };
-  // Inkling rungs (empty-final ladder, #79 rescue) only for text-only turns.
-  const inklingAllowed = () => !hasImages && isInklingConfigured();
 
   let iterations = 0;
-  let currentQuery = userQuery;
-  // What the first Gemini call sends as the current turn; becomes the
+  // What the first model call sends as the current turn; becomes the
   // continuation directive once the user turn has moved into history.
   let currentMessage: string | Part[] = hasImages ? userParts : userQuery;
   // The user query starts as the `message` arg and is only appended to geminiHistory once we
@@ -534,12 +532,6 @@ export async function* runFacilitator(
   // Terminal-Gemini-error rescue (#79): at most ONE Inkling rescue attempt per request
   // (cost guardrail), tracked separately from the ladder's emptyFinalRetries.
   let inklingRescueUsed = false;
-  // An image turn cannot run on Inkling (spec 211). The chat route refuses images
-  // under PRIMARY_BACKEND=inkling before persisting; this guards every other caller.
-  if (hasImages && useInklingRung) {
-    yield { type: 'error', data: 'Image attachments are not available right now' };
-    return;
-  }
 
   // Provenance of the provider currently serving this request (issue #99), read at
   // terminal-yield time so it reflects the call that actually produced (or failed
@@ -752,7 +744,7 @@ export async function* runFacilitator(
       // INKLING_TIMEOUT_MS owns the per-call cap — min() preserves both. At the
       // default (180s > the whole budget) this is a no-op.
       const stream = useInklingRung
-        ? streamInkling(currentQuery, {
+        ? streamInkling(currentMessage, {
             ...callOptions,
             timeoutMs: Math.min(remainingToSoft, config.inkling.timeoutMs),
           })
@@ -839,7 +831,7 @@ export async function* runFacilitator(
           const currentModel = useInklingRung ? config.inkling.model : config.gemini.model;
           // Rung 2 (#74/#79) runs on Inkling's separate (non-Vertex) infrastructure;
           // without TINKER_API_KEY the ladder is the single same-model retry.
-          const inklingAvailable = inklingAllowed();
+          const inklingAvailable = isInklingConfigured();
           const maxRetries = inklingAvailable ? MAX_EMPTY_FINAL_RETRIES : 1;
           const summary = {
             degenerateKind,
@@ -927,7 +919,7 @@ export async function* runFacilitator(
 
       // Process tool calls
       // Add the user message to history the first time we continue past a model turn
-      // (it was removed to send as currentQuery, but we need it in history for context).
+      // (it was removed to send as currentMessage, but we need it in history for context).
       // Guard on the flag, NOT `iterations === 1`: a degenerate-final retry (empty/fragment/
       // MALFORMED, or the Inkling rescue) does `continue` after `iterations++`, so if the FIRST
       // call fails and the retry then requests a tool, we are at iterations === 2 here and the
@@ -1044,7 +1036,6 @@ export async function* runFacilitator(
       // the empty user turn after functionResponse parts is the trigger for flash's
       // thoughts-only empty completions under load. Transient — never added to
       // geminiHistory, so it cannot accumulate across rounds or persist.
-      currentQuery = TOOL_CONTINUATION_DIRECTIVE;
       currentMessage = TOOL_CONTINUATION_DIRECTIVE;
       continue;
     } catch (error) {
@@ -1072,7 +1063,7 @@ export async function* runFacilitator(
         !inklingRescueUsed &&
         !visibleTextDelivered &&
         softDeadline - Date.now() >= INKLING_RESCUE_MIN_REMAINING_MS &&
-        inklingAllowed()
+        isInklingConfigured()
       ) {
         inklingRescueUsed = true;
         useInklingRung = true;

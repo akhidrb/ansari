@@ -8,10 +8,10 @@ import { maybeGenerateThreadName } from '@/lib/ai/thread-naming';
 import { runFacilitator, type Message } from '@/lib/facilitator/agent';
 import { startHeartbeat, SSE_HEARTBEAT } from '@/lib/streaming/heartbeat';
 import { toolCallsOrNull, type ContentBlock } from '@/db/schema/messages';
-import { config } from '@/lib/config';
 import {
   MAX_CHAT_BODY_BYTES,
   decodeImages,
+  readBodyWithin,
   imagesSchema,
   placeholderBlocks,
   type ImageAttachment,
@@ -51,15 +51,16 @@ export async function POST(request: NextRequest, context: RouteContext) {
       return createErrorResponse('Thread not found', 404);
     }
 
-    // Bound the buffered body before parsing it (spec 211): images make this
-    // route's body large, and a route handler imposes no limit of its own. The
-    // header check refuses early; the length check covers a body sent without one.
+    // Bound the body before parsing it (spec 211): images make this route's body
+    // large, and a route handler imposes no limit of its own. The header check
+    // refuses early; the capped read stops a body that hides or understates its
+    // size as soon as it passes the limit, instead of buffering all of it first.
     const declaredLength = Number(request.headers.get('content-length') ?? 0);
     if (declaredLength > MAX_CHAT_BODY_BYTES) {
       return createErrorResponse('Request body too large', 413);
     }
-    const rawBody = await request.text();
-    if (Buffer.byteLength(rawBody) > MAX_CHAT_BODY_BYTES) {
+    const rawBody = await readBodyWithin(request, MAX_CHAT_BODY_BYTES);
+    if (rawBody === null) {
       return createErrorResponse('Request body too large', 413);
     }
 
@@ -78,11 +79,6 @@ export async function POST(request: NextRequest, context: RouteContext) {
     // facilitator and never persisted, logged, or sent to thread naming.
     let images: ImageAttachment[] = [];
     if (parseResult.data.images && parseResult.data.images.length > 0) {
-      // Inkling cannot see images, so an image turn is Gemini-only. With
-      // Inkling as the primary backend there is no model to send it to.
-      if (config.primaryBackend === 'inkling') {
-        return createErrorResponse('Image attachments are not available right now', 422);
-      }
       const decoded = decodeImages(parseResult.data.images);
       if (!decoded.ok) {
         return createErrorResponse(decoded.error, 422);
