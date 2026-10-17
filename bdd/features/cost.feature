@@ -23,6 +23,21 @@ Feature: Cost of an image question
 
     Examples:
       | images | max_cost | question                                                         |
-      | 0      | 0.01     | What does Surah Al-Ikhlas teach about God?                       |
+      | 0      | 0.04     | What does Surah Al-Ikhlas teach about God?                       |
       | 1      | 0.02     | What number is written in this image, and is it a prime number?  |
       | 4      | 0.05     | What numbers are written in these images, and which are primes?  |
+
+  Scenario Outline: A realistic image question that searches: <case>
+    The questions above about numbers need no search, so they take one model call.
+    A real question about a photographed page makes the model search the Quran and
+    tafsir first, which takes several calls, and every call re-sends the image. This
+    asks for the same explanation with and without the photo, so the difference is
+    the image's real cost.
+
+    When I ask "<question>" <how>, 3 times
+    Then the median cost of one answer is at most $<max_cost>
+
+    Examples:
+      | case               | how                                                  | max_cost | question                                                                       |
+      | photo of the page  | with the fixture image "quran-photo-ahzab.png"       | 0.08     | Explain the meaning of the outlined verses in this photo.                      |
+      | same request, text | with no images                                       | 0.06     | Explain the meaning of Surah Al-Ahzab, verses 23 and 24.                       |

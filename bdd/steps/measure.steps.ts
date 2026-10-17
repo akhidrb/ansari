@@ -1,8 +1,16 @@
 import assert from 'node:assert/strict';
 import { Then, When } from '@cucumber/cucumber';
-import { ask, createThread, latestAnswerRecord, type AnswerRecord } from '../support/api.ts';
+import { ask, createThread, latestAnswerRecord, type AnswerRecord, type ImageInput } from '../support/api.ts';
 import { requireSettings, settings } from '../support/env.ts';
-import { numberedImage, randomNumbers, toInput } from '../support/images.ts';
+import {
+  APP_MAX_EDGE,
+  FIXTURE_DIR,
+  loadTextFixtures,
+  numberedImage,
+  randomNumbers,
+  shrinkLikeTheApp,
+  toInput,
+} from '../support/images.ts';
 import { addRow, fmt, median } from '../support/report.ts';
 import type { ImageWorld } from '../support/world.ts';
 
@@ -24,43 +32,70 @@ function costOf(r: AnswerRecord, p: { input: number; output: number }): number {
   return (r.inputTokens * p.input + (r.outputTokens + r.thinkingTokens) * p.output) / 1_000_000;
 }
 
+/**
+ * Ask the same question `times` times, each in a fresh thread (earlier turns
+ * would add cost and time), and record what each answer cost and how long it took.
+ */
+async function measure(world: ImageWorld, question: string, makeImages: () => Promise<ImageInput[]>, times: number) {
+  const feature = world.feature.startsWith('Cost') ? 'cost' : 'latency';
+  const p = prices();
+  world.runs = [];
+  for (let i = 0; i < times; i++) {
+    const threadId = await createThread(world.baseUrl, world.token);
+    const images = await makeImages();
+    const result = await ask(world.baseUrl, world.token, threadId, question, images);
+    assert.equal(result.error, null, `run ${i + 1} failed (status ${result.status}): ${result.error}`);
+    const record = await latestAnswerRecord(threadId);
+    world.runs.push({ threadId, images: images.length, result, record });
+
+    addRow(
+      'Measured answers',
+      ['Feature', 'Question', 'Images', 'Run', 'Model', 'Input tok', 'Output tok', 'Thinking tok', 'Cost', 'First word', 'Full answer', 'Upload'],
+      [
+        feature,
+        question.length > 50 ? `${question.slice(0, 50)}…` : question,
+        images.length,
+        i + 1,
+        record?.modelId ?? '?',
+        record?.inputTokens ?? '?',
+        record?.outputTokens ?? '?',
+        record?.thinkingTokens ?? '?',
+        record && p ? fmt.usd(costOf(record, p)) : 'set prices',
+        fmt.sec(result.firstWordMs),
+        fmt.sec(result.totalMs),
+        fmt.mb(result.uploadBytes),
+      ],
+      'Each run is a fresh thread. Tokens are what the server recorded for the whole answer (all model calls).'
+    );
+  }
+}
+
 When(
   /^I ask "(.*)" with (\d+) photo-sized images, (\d+) times$/,
   async function (this: ImageWorld, question: string, imageCount: string, times: string) {
-    const feature = this.feature.startsWith('Cost') ? 'cost' : 'latency';
-    const p = prices();
-    this.runs = [];
-    for (let i = 0; i < Number(times); i++) {
-      // A fresh thread per run: earlier turns in the history would add cost and time.
-      const threadId = await createThread(this.baseUrl, this.token);
-      const numbers = randomNumbers(Number(imageCount));
-      const images = await Promise.all(numbers.map(async (n) => toInput(await numberedImage(n))));
-      const result = await ask(this.baseUrl, this.token, threadId, question, images);
-      assert.equal(result.error, null, `run ${i + 1} failed (status ${result.status}): ${result.error}`);
-      const record = await latestAnswerRecord(threadId);
-      this.runs.push({ threadId, images: images.length, result, record });
-
-      addRow(
-        'Measured answers',
-        ['Feature', 'Images', 'Run', 'Model', 'Input tok', 'Output tok', 'Thinking tok', 'Cost', 'First word', 'Full answer', 'Upload'],
-        [
-          feature,
-          images.length,
-          i + 1,
-          record?.modelId ?? '?',
-          record?.inputTokens ?? '?',
-          record?.outputTokens ?? '?',
-          record?.thinkingTokens ?? '?',
-          record && p ? fmt.usd(costOf(record, p)) : 'set prices',
-          fmt.sec(result.firstWordMs),
-          fmt.sec(result.totalMs),
-          fmt.mb(result.uploadBytes),
-        ],
-        'Each run is a fresh thread. Tokens are what the server recorded for the whole answer (all model calls).'
-      );
-    }
+    await measure(
+      this,
+      question,
+      async () => Promise.all(randomNumbers(Number(imageCount)).map(async (n) => toInput(await numberedImage(n)))),
+      Number(times)
+    );
   }
 );
+
+When(
+  /^I ask "(.*)" with the fixture image "(.*)", (\d+) times$/,
+  async function (this: ImageWorld, question: string, name: string, times: string) {
+    const fixture = loadTextFixtures().find((f) => f.name === name);
+    assert.ok(fixture, `no fixture image named ${name} in ${FIXTURE_DIR}`);
+    // Sent the way the app sends a picked photo.
+    const jpeg = await shrinkLikeTheApp(fixture.image, APP_MAX_EDGE);
+    await measure(this, question, async () => [toInput(jpeg)], Number(times));
+  }
+);
+
+When(/^I ask "(.*)" with no images, (\d+) times$/, async function (this: ImageWorld, question: string, times: string) {
+  await measure(this, question, async () => [], Number(times));
+});
 
 Then('the median cost of one answer is at most ${float}', function (this: ImageWorld, max: number) {
   requireSettings(['GEMINI_INPUT_USD_PER_MTOK', 'GEMINI_OUTPUT_USD_PER_MTOK'], 'cost');
