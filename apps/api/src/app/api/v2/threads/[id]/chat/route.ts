@@ -8,6 +8,7 @@ import { maybeGenerateThreadName } from '@/lib/ai/thread-naming';
 import { runFacilitator, type Message } from '@/lib/facilitator/agent';
 import { startHeartbeat, SSE_HEARTBEAT } from '@/lib/streaming/heartbeat';
 import { toolCallsOrNull, type ContentBlock } from '@/db/schema/messages';
+import { safeErrorMeta } from '@/lib/log';
 import {
   MAX_CHAT_BODY_BYTES,
   decodeImages,
@@ -245,8 +246,14 @@ export async function POST(request: NextRequest, context: RouteContext) {
             }
           }
         } catch (error) {
-          console.error('Stream error:', error);
-          Sentry.captureException(error);
+          // On an image turn, name and code only: the error could echo image data.
+          if (images.length > 0) {
+            console.error('Stream error:', safeErrorMeta(error));
+            Sentry.captureMessage('chat stream error', { level: 'error', extra: safeErrorMeta(error) });
+          } else {
+            console.error('Stream error:', error);
+            Sentry.captureException(error);
+          }
           safeEnqueue(
             encoder.encode(
               `data: ${JSON.stringify({
@@ -270,8 +277,10 @@ export async function POST(request: NextRequest, context: RouteContext) {
       },
     });
   } catch (error) {
-    console.error('Chat error:', error);
-    Sentry.captureException(error);
+    // Name and code only: errors here include body parsing, and a JSON parse
+    // error quotes part of the body, which can be image data or the user's text.
+    console.error('Chat error:', safeErrorMeta(error));
+    Sentry.captureMessage('chat route error', { level: 'error', extra: safeErrorMeta(error) });
     return createErrorResponse('Failed to process chat message', 500);
   }
 }

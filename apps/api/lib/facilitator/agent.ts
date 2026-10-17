@@ -22,6 +22,7 @@ import { config } from '../config';
 import { createToolMap, getGeminiToolDescriptions } from '../tools';
 import { citabilityOf, type ToolResult } from '../tools/types';
 import { isImagePlaceholder, type ImageAttachment } from '../attachments';
+import { safeErrorMeta } from '../log';
 import { unavailableResult, reportDegradedTool, toolLabel } from '../tools/resilience';
 import type {
   ContentBlock,
@@ -503,6 +504,19 @@ export async function* runFacilitator(
     ...images.map((img) => ({ inlineData: { mimeType: img.mediaType, data: img.data } })),
   ];
   const userTurn: Content = { role: 'user', parts: hasImages ? userParts : [{ text: userQuery }] };
+  // Report a failed model call. On an image turn only the error's name and code
+  // are logged (spec 211: image bytes are never logged): a provider error can
+  // echo the request, and an image turn's request holds the image data.
+  const reportFailure = (label: string, error: unknown) => {
+    if (hasImages) {
+      const meta = safeErrorMeta(error);
+      console.error(label, meta);
+      Sentry.captureMessage(label, { level: 'error', extra: meta });
+    } else {
+      console.error(label, error);
+      Sentry.captureException(error);
+    }
+  };
 
   let iterations = 0;
   // What the first model call sends as the current turn; becomes the
@@ -657,8 +671,7 @@ export async function* runFacilitator(
         }
       }
     } catch (error) {
-      console.error('Facilitator synthesis error:', error);
-      Sentry.captureException(error);
+      reportFailure('Facilitator synthesis error:', error);
       logShortCircuit('error');
       yield {
         type: 'error',
@@ -1070,11 +1083,14 @@ export async function* runFacilitator(
         // Same no-PII breadcrumb shape as the #74 ladder engagement but a DISTINCT
         // message, so ladder-engagements and error-rescues stay separable in Sentry.
         // The error text is provider-generated (never query text); truncated anyway.
+        // On an image turn even that is withheld: it could echo the image data.
         const rescueSummary = {
           elapsedMs: Date.now() - startTime,
           iterations,
           toolCallCount: tracker.history.length,
-          error: (error instanceof Error ? error.message : String(error)).slice(0, 200),
+          error: hasImages
+            ? safeErrorMeta(error)
+            : (error instanceof Error ? error.message : String(error)).slice(0, 200),
         };
         console.warn('[facilitator] terminal Gemini error — rescuing on Inkling', rescueSummary);
         Sentry.addBreadcrumb({
@@ -1089,8 +1105,7 @@ export async function* runFacilitator(
         });
         continue;
       }
-      console.error('Facilitator error:', error);
-      Sentry.captureException(error);
+      reportFailure('Facilitator error:', error);
       yield {
         type: 'error',
         data: error instanceof Error ? error.message : 'Unknown error',

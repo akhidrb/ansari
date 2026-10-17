@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 /**
  * Image attachments in the facilitator — spec 211.
@@ -56,10 +56,10 @@ function emptyRound(): () => AsyncGenerator<AnyEvent> {
   };
 }
 
-function throwingRound(): () => AsyncGenerator<AnyEvent> {
+function throwingRound(message = 'vertex 500'): () => AsyncGenerator<AnyEvent> {
   // eslint-disable-next-line require-yield
   return async function* () {
-    throw new Error('vertex 500');
+    throw new Error(message);
   };
 }
 
@@ -124,6 +124,8 @@ vi.mock('@/lib/tools', () => ({
     ]),
 }));
 
+import * as Sentry from '@sentry/nextjs';
+import { isInklingConfigured } from '@/lib/ai/inkling-client';
 import { runFacilitator, imageUnavailableNote, type Message } from '../lib/facilitator/agent';
 import type { ImageAttachment } from '../lib/attachments';
 
@@ -305,5 +307,55 @@ describe('image turns that move to Inkling keep their images (spec 211)', () => 
 
     expect(h.inklingCalls).toHaveLength(1);
     expect(h.inklingCalls[0].message).toBe('What is sabr?');
+  });
+});
+
+describe('image turns never log the image data (spec 211)', () => {
+  // A provider error that echoes the request is the realistic leak.
+  const ECHO = `bad request: {"inlineData":{"data":"${IMAGE.data}"}}`;
+
+  // clearAllMocks keeps a mockReturnValue; put Inkling back to configured.
+  afterEach(() => {
+    vi.mocked(isInklingConfigured).mockReturnValue(true);
+  });
+
+  function everythingLogged(): string {
+    return JSON.stringify([
+      vi.mocked(console.error).mock.calls,
+      vi.mocked(console.warn).mock.calls,
+      vi.mocked(Sentry.captureException).mock.calls,
+      vi.mocked(Sentry.captureMessage).mock.calls,
+      vi.mocked(Sentry.addBreadcrumb).mock.calls,
+    ]);
+  }
+
+  it('an unrescued Gemini error on an image turn logs name and code only', async () => {
+    vi.mocked(isInklingConfigured).mockReturnValue(false);
+    h.scripts = [throwingRound(ECHO)];
+
+    const events = await collect(runFacilitator([user('What is this?', 1)], undefined, { images: [IMAGE] }));
+
+    expect(events.at(-1)?.type).toBe('error');
+    expect(vi.mocked(console.error)).toHaveBeenCalledWith('Facilitator error:', { name: 'Error' });
+    expect(Sentry.captureException).not.toHaveBeenCalled();
+    expect(everythingLogged()).not.toContain(IMAGE.data);
+  });
+
+  it('a rescued Gemini error on an image turn keeps the data out of the rescue log', async () => {
+    h.scripts = [throwingRound(ECHO)];
+
+    await collect(runFacilitator([user('What is this?', 1)], undefined, { images: [IMAGE] }));
+
+    expect(h.inklingCalls).toHaveLength(1);
+    expect(everythingLogged()).not.toContain(IMAGE.data);
+  });
+
+  it('control: a text-only turn still reports the full error', async () => {
+    vi.mocked(isInklingConfigured).mockReturnValue(false);
+    h.scripts = [throwingRound('vertex 500')];
+
+    await collect(runFacilitator([user('What is sabr?')]));
+
+    expect(Sentry.captureException).toHaveBeenCalledWith(expect.objectContaining({ message: 'vertex 500' }));
   });
 });

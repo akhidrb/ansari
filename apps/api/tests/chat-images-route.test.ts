@@ -224,6 +224,17 @@ describe('POST /threads/[id]/chat with images', () => {
     expect(pulled).toBeLessThan(TOTAL_CHUNKS);
   });
 
+  it('a body that fails to parse is logged by name and code only, never quoted', async () => {
+    // JSON.parse errors quote part of the input, which here is image data.
+    const broken = `{"message":"q","images":[{"media_type":"image/png","data":"${PNG_B64}"}]`;
+
+    const res = await chatPost(chatRequest(broken), ctx('thread-1'));
+
+    expect(res.status).toBe(500);
+    expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain(PNG_B64);
+    expect(vi.mocked(console.error)).toHaveBeenCalledWith('Chat error:', { name: 'SyntaxError' });
+  });
+
   it('accepts images under PRIMARY_BACKEND=inkling: Inkling sees images too', async () => {
     h.primaryBackend = 'inkling';
 
